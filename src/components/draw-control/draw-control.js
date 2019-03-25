@@ -36,6 +36,8 @@ const MODES = {
   DRAW_POLYGON: 'DRAW_POLYGON'
 };
 
+const DRAWING_MODES = [MODES.DRAW_POINT, MODES.DRAW_PATH, MODES.DRAW_POLYGON];
+
 const MODE_TO_TYPE = {
   [MODES.DRAW_POINT]: 'Point',
   [MODES.DRAW_PATH]: 'LineString',
@@ -56,12 +58,14 @@ const VERTEX_RADIUS = 10;
 
 const propTypes = {
   ...BaseControl.propTypes,
+  mode: PropTypes.string,
   onSelect: PropTypes.func.isRequired,
   onUpdate: PropTypes.func.isRequired
 };
 
 const defaultProps = Object.assign({}, BaseControl.defaultProps, {
-  captureClick: true
+  style: FEATURE_STYLES,
+  mode: MODES.READ_ONLY
 });
 
 export default class DrawControl extends BaseControl {
@@ -75,6 +79,7 @@ export default class DrawControl extends BaseControl {
       ...this.state,
       features: props.features ? props.features.map(f => Feature.fromFeature(f)) : null,
       selectedId: null,
+      hoveredId: null,
       draggingVertex: -1,
       startDragPos: {},
       isDragging: false,
@@ -110,13 +115,13 @@ export default class DrawControl extends BaseControl {
       return;
     }
 
-    // panstart is already attached by parent class BaseControl,
-    // here we just add listeners for subsequent drag events
     this._events = {
       click: evt => this._onEvent(this._onClick, evt),
       pointermove: evt => this._onEvent(this._onMouseMove, evt),
       pointerdown: (evt) => this._onEvent(this._onMouseDown, evt),
-      pointerup: evt => this._onEvent(this._onMouseUp, evt)
+      pointerup: evt => this._onEvent(this._onMouseUp, evt),
+      pointerover: evt => this._onEvent(this._onMouseOver, evt),
+      pointerout: evt => this._onEvent(this._onMouseOut, evt)
     };
 
     eventManager.on(this._events, containerRef);
@@ -167,6 +172,17 @@ export default class DrawControl extends BaseControl {
     this.props.onSelect(selectedFeature.id);
   };
 
+  _addFeature = (type, point) => {
+    const feature = new Feature({
+      id: Date.now(),
+      type,
+      renderType: type
+    });
+
+    this._addPoint(point.x, point.y, feature);
+  };
+
+  /* EVENTS */
   _onEvent = (handler, evt, ...args) => {
     const {mode} = this.props;
     if (
@@ -181,7 +197,6 @@ export default class DrawControl extends BaseControl {
   };
 
   _onMouseUp = (evt) => {
-    evt.stopPropagation();
     this.setState({
       isDragging: false,
       didDrag: false
@@ -199,22 +214,16 @@ export default class DrawControl extends BaseControl {
     const elem = evt.target;
     if (elem.className.baseVal.startsWith('vertex')) {
       const [index] = elem.id.split('.');
-      this._onDragVertex(evt, index);
+      const {x, y} = this._getEventPosition(evt);
+      this.setState({
+        draggingVertex: index,
+        startDragPos: {x, y},
+        isDragging: true
+      });
     }
   };
 
-  _onDragVertex = (evt, index) => {
-    const {x, y} = this._getEventPosition(evt);
-    this.setState({
-      draggingVertex: index,
-      startDragPos: {x, y},
-      isDragging: true,
-      didDrag: false
-    });
-  };
-
   _onMouseMove = (evt) => {
-    evt.stopPropagation();
     const {x, y} = this._getEventPosition(evt);
     const {startDragPos, isDragging, didDrag, draggingVertex} = this.state;
     if (isDragging && !didDrag) {
@@ -231,18 +240,23 @@ export default class DrawControl extends BaseControl {
 
       if (selectedFeature) {
         selectedFeature.replacePoint(draggingVertex, [lngLat[0], lngLat[1]]);
+        // TODO: should update state.features
       }
     }
   };
 
-  _addFeature = (type, point) => {
-    const feature = new Feature({
-      id: Date.now(),
-      type,
-      renderType: type
-    });
+  _onMouseOver = (evt) => {
+    const elem = evt.target;
+    if (elem.className.baseVal.startsWith('feature')) {
+      this._onHoverFeature(this.state.features[elem.id]);
+    }
+  };
 
-    this._addPoint(point.x, point.y, feature);
+  _onMouseOut = (evt) => {
+    const elem = evt.target;
+    if (elem.className.baseVal.startsWith('feature')) {
+      this._onHoverFeature(null);
+    }
   };
 
   _onClick = (evt: MjolnirEvent) => {
@@ -250,9 +264,11 @@ export default class DrawControl extends BaseControl {
       return;
     }
 
+    const {mode} = this.props;
     const elem = evt.target;
 
-    if (elem.className.baseVal.startsWith('feature')) {
+    const isDrawing = DRAWING_MODES.indexOf(mode) !== -1;
+    if (!isDrawing && elem.className.baseVal.startsWith('feature')) {
       this._onClickFeature(evt, this.state.features[elem.id]);
       return;
     }
@@ -263,16 +279,16 @@ export default class DrawControl extends BaseControl {
       return;
     }
 
-    if (this.state.didDrag) {
-      return;
-    }
-
-    evt.stopImmediatePropagation();
-    const {mode} = this.props;
     const selectedFeature = this._getSelectedFeature();
     const {x, y} = this._getEventPosition(evt);
 
     switch (mode) {
+    case MODES.EDIT_VERTEX:
+      if (selectedFeature) {
+        this.props.onSelect(null);
+      }
+      break;
+
     case MODES.DRAW_POINT:
       this._addFeature(MODE_TO_TYPE[mode], {x, y});
       break;
@@ -297,11 +313,14 @@ export default class DrawControl extends BaseControl {
     }
   };
 
+  _onHoverFeature = (feature) => {
+    this.setState({hoveredId: feature.id});
+  };
+
   _onClickFeature = (evt, feature) => {
     if (
       this.props.mode === MODES.SELECT_FEATURE ||
-      this.props.mode === MODES.EDIT_VERTEX ||
-      !this.state.selectedId
+      this.props.mode === MODES.EDIT_VERTEX
     ) {
       this.props.onSelect(feature.id);
       evt.stopPropagation();
@@ -313,6 +332,11 @@ export default class DrawControl extends BaseControl {
       this._closePath();
     }
     evt.stopPropagation();
+  };
+
+  _getSelectedFeature = () => {
+    const {features, selectedId} = this.state;
+    return features && features.find(f => f.id === selectedId);
   };
 
   _project = (pt) => {
@@ -350,25 +374,34 @@ export default class DrawControl extends BaseControl {
     }
   }
 
-  _getSelectedFeature = () => {
-    const {features, selectedId} = this.state;
-    return features && features.find(f => f.id === selectedId);
+  /* RENDER */
+  _getStyle = (feature) => {
+    if (!feature) {
+      return null;
+    }
+    const {style} = this.props;
+    const {selectedId, hoveredId} = this.state;
+    const selected = feature.id === selectedId;
+    const hovered = feature = hoveredId;
+    if (typeof style === 'function') {
+      return style(feature.toFeature(), {hovered, selected});
+    }
+
+    return style[feature.otherProps.renderType];
   };
 
   _renderVertex(coords, index, operation, radius, style) {
     const p = this._project(coords);
     return (
-      <g className="vertex-group" key={index} id={`${index}.${operation}`}
-         transform={`translate (${p[0]} ${p[1]})`} style={style}>
-        <circle
-          id={`${index}.${operation}`}
-          key={index}
-          className="vertex"
-          cx={0}
-          cy={0}
-          r={radius}
-        />
-      </g>
+      <circle
+        id={`${index}.${operation}`}
+        key={index}
+        className="vertex"
+        style={{...style, fill: style.stroke}}
+        cx={p[0]}
+        cy={p[1]}
+        r={radius}
+      />
     );
   }
 
@@ -376,10 +409,10 @@ export default class DrawControl extends BaseControl {
     const {mode} = this.props;
     const feature = this._getSelectedFeature();
     const {points, isClosed} = feature;
-    const style = FEATURE_STYLES[feature.otherProps.renderType];
+    const style = this._getStyle(feature);
 
     return (
-      <g style={(mode === MODES.READ_ONLY || mode === MODES.SELECT) ? STATIC_STYLE : null}>
+      <g style={(mode === MODES.READ_ONLY || mode === MODES.SELECT_FEATURE) ? STATIC_STYLE : null}>
         {points.length > 1 && <path style={style} d={this._getProjectedData(feature)}/>}
         <g>{
           points.map((p, i) => {
@@ -428,13 +461,26 @@ export default class DrawControl extends BaseControl {
 
     case 'LineString':
       return (
-        <path
-          className="feature line-string"
-          key={index}
-          id={index}
-          style={style}
-          d={this._getProjectedData(feature)}
-        />
+        <g className="feature line-string" key={index}>
+          <path
+            className="feature line-string visible"
+            key={index}
+            id={index}
+            style={style}
+            d={this._getProjectedData(feature)}
+          />
+          <path
+            className="feature line-string hidden"
+            key={`${index}-hidden`}
+            id={index}
+            style={{
+              ...style,
+              strokeWidth: 10,
+              opacity: 0
+            }}
+            d={this._getProjectedData(feature)}
+          />
+        </g>
       );
 
     case 'Polygon':
@@ -488,7 +534,8 @@ export default class DrawControl extends BaseControl {
           width,
           height
         }}
-        ref={this._containerRef.current}
+        // eslint-disable-next-line no-return-assign
+        ref={_ => this._containerRef.current = _}
       >
         {this._renderCanvas()}
       </div>
